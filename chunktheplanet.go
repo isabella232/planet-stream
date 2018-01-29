@@ -12,6 +12,7 @@ import (
 	"errors"
 	"path"
 	"io"
+	"flag"
 )
 
 func check(e error) {
@@ -48,8 +49,11 @@ func (pbf PBF) Close() error {
 }
 
 func main() {
-	pbf, err := Open("/Users/michellesteigerwalt/repos/tabula-rasa/data/pbfs/planet-latest.osm.pbf")
-	//pbf, err := Open("planet.osm.pbf")
+	locPtr := flag.String("i", "", "input file")
+	flag.Parse()
+
+	fname := *locPtr
+	pbf, err := Open(fname)
 	check(err)
 	defer pbf.Close()
 
