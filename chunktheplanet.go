@@ -270,8 +270,6 @@ func (pbf Planetfile) NextBlock() (*Block, error) {
 		SizeBlock: sizeBlock,
 		StartByte: startByte,
 	}
-
-	time.Sleep(250 * time.Millisecond)
 	return block, err
 
 }
