@@ -12,7 +12,11 @@ import (
 	"errors"
 	"path"
 	"io"
+	"io/ioutil"
 	"flag"
+	"net/http"
+	"strings"
+	"time"
 )
 
 func check(e error) {
@@ -31,34 +35,128 @@ type Block struct {
 	StartByte int64
 }
 
+type Stream interface {
+	Close() error
+	Read([]byte) (int, error)
+	Rewind()
+	SetCursor(int64) (error)
+	GetCursor() (int64, error)
+}
 
-type PBFIO struct {
+// File IO
+type IOStream struct {
 	Location string
 	file *os.File
 }
 
-func Open(filename string) (PBFIO, error) {
+// HTTP Streaming
+type HttpStream struct {
+	Location string
+	cur int64
+	client *http.Client
+	lastRequest time.Time
+	requestRate time.Duration
+}
+
+type Planetfile struct {
+	Location string
+	stream Stream
+}
+
+func OpenIO(filename string) (*IOStream, error) {
 	file, err := os.Open(filename)
 	if err != nil {
-		return PBFIO{}, err
+		return &IOStream{}, err
 	}
-	return PBFIO{filename, file}, nil
+	return &IOStream{filename, file}, nil
 }
 
-func (pbf PBFIO) Close() error {
-	return pbf.file.Close()
+func OpenHttp(url string) (*HttpStream, error) {
+	return &HttpStream{url, 0, &http.Client{}, time.Now(), 0*time.Second}, nil
 }
 
-func (pbf PBFIO) Read(buff []byte) (int, error) {
-	return pbf.file.Read(buff)
+func OpenStream(loc string) (*Planetfile, error) {
+	if strings.HasPrefix(loc, "http") {
+		s, e := OpenHttp(loc)
+		return &Planetfile{loc, s}, e
+	}
+	s, e := OpenIO(loc)
+	return &Planetfile{loc, s}, e
+}
+
+func (s IOStream) Close() error {
+	return s.file.Close()
+}
+
+func (s IOStream) Read(buff []byte) (int, error) {
+	return s.file.Read(buff)
+}
+
+func (s IOStream) Rewind() {
+	s.SetCursor(0)
+}
+
+func (s IOStream) GetCursor() (int64, error) {
+	return s.file.Seek(0, 1)
+}
+
+func (s IOStream) SetCursor(i int64) (error) {
+	_, e := s.file.Seek(i, 0)
+	return e
+}
+
+func (pbf Planetfile) Close() {
+	pbf.stream.Close()
+}
+
+func (s *HttpStream) Read(buff []byte) (int, error) {
+	if s.requestRate > 0 {
+		start := s.lastRequest
+		now := time.Now()
+		elapsed := now.Sub(start)
+		if elapsed < s.requestRate {
+			time.Sleep((s.requestRate-elapsed))
+		}
+	}
+	end := s.cur + int64(len(buff))
+	req, _ := http.NewRequest("GET", s.Location, nil)
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", s.cur, end))
+	s.SetCursor(end)
+	res, err := s.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	s.lastRequest = time.Now()
+	// Stacked defers are LIFO: Last In, First Out, so these two lines
+	// will actually run backwards.
+	defer res.Body.Close()
+	defer io.Copy(ioutil.Discard, res.Body)
+	return res.Body.Read(buff)
+}
+
+func (s *HttpStream) Rewind() {
+	s.cur = int64(0)
+}
+
+func (s *HttpStream) GetCursor() (int64, error) {
+	return s.cur, nil
+}
+
+func (s *HttpStream) SetCursor(i int64) (error) {
+	s.cur = i
+	return nil
+}
+
+func (s *HttpStream) Close() (error) {
+	return nil
 }
 
 func main() {
-	locPtr := flag.String("i", "", "input file")
+	locPtr := flag.String("i", "", "input file or URL")
 	flag.Parse()
 
 	fname := *locPtr
-	pbf, err := Open(fname)
+	pbf, err := OpenStream(fname)
 	check(err)
 	defer pbf.Close()
 
@@ -71,7 +169,7 @@ func main() {
 	fmt.Println("Writingprogram:", header.GetWritingprogram())
 	fmt.Println("OsmosisReplicationSequenceNumber:", header.GetOsmosisReplicationSequenceNumber())
 
-	pbf.Rewind()
+	pbf.stream.Rewind()
 	headBlock, err := pbf.NextBlock()
 	check(err)
 
@@ -99,19 +197,11 @@ func main() {
 
 }
 
-func (pbf PBFIO) Rewind() {
-	pbf.file.Seek(int64(0), 0)
-}
-
-func (pbf PBFIO) Seek(i int, w int) (int64, error) {
-	return pbf.file.Seek(int64(i), w)
-}
-
-func (pbf PBFIO) ReadFileHeader() (*OSMPBF.HeaderBlock, error) {
+func (pbf Planetfile) ReadFileHeader() (*OSMPBF.HeaderBlock, error) {
 
 	// Start at the beginning 'cause that's where the file header
 	// lives.
-	pbf.Rewind()
+	pbf.stream.Rewind()
 
 	block, err := pbf.NextBlock()
 	if err != nil {
@@ -130,22 +220,23 @@ func (pbf PBFIO) ReadFileHeader() (*OSMPBF.HeaderBlock, error) {
 
 }
 
-func (pbf PBFIO) NextBlock() (*Block, error) {
+func (pbf Planetfile) NextBlock() (*Block, error) {
 
 	// First four bytes are a BigEndian int32 indicating the
 	// size of the subsequent BlobHeader.
 	sizeBlock := make([]byte, 4)
-	_, err := pbf.Read(sizeBlock)
+	_, err := pbf.stream.Read(sizeBlock)
 	if err != nil {
 		return nil, err
 	}
+
 	size := binary.BigEndian.Uint32(sizeBlock)
 
-	startByte, _ := pbf.Seek(0, 1)
+	startByte, _ := pbf.stream.GetCursor()
 
 	// Grab the next <size> bytes
 	b := make([]byte, size)
-	_, err = pbf.Read(b)
+	_, err = pbf.stream.Read(b)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +250,7 @@ func (pbf PBFIO) NextBlock() (*Block, error) {
 
 	// Grab the blob size indicated by the blobHeader.
 	b = make([]byte, blobHeader.GetDatasize())
-	_, err = pbf.Read(b)
+	_, err = pbf.stream.Read(b)
 	if err != nil {
 		return nil, err
 	}
@@ -180,6 +271,7 @@ func (pbf PBFIO) NextBlock() (*Block, error) {
 		StartByte: startByte,
 	}
 
+	time.Sleep(250 * time.Millisecond)
 	return block, err
 
 }
