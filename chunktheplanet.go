@@ -31,21 +31,26 @@ type Block struct {
 	StartByte int64
 }
 
-type PBF struct {
-	Filename string
+
+type PBFIO struct {
+	Location string
 	file *os.File
 }
 
-func Open(filename string) (PBF, error) {
+func Open(filename string) (PBFIO, error) {
 	file, err := os.Open(filename)
 	if err != nil {
-		return PBF{}, err
+		return PBFIO{}, err
 	}
-	return PBF{filename, file}, nil
+	return PBFIO{filename, file}, nil
 }
 
-func (pbf PBF) Close() error {
+func (pbf PBFIO) Close() error {
 	return pbf.file.Close()
+}
+
+func (pbf PBFIO) Read(buff []byte) (int, error) {
+	return pbf.file.Read(buff)
 }
 
 func main() {
@@ -59,7 +64,7 @@ func main() {
 
 	header, err := pbf.ReadFileHeader()
 
-	fmt.Println("File:", pbf.Filename)
+	fmt.Println("File:", pbf.Location)
 	fmt.Println("Source:", header.GetSource())
 	fmt.Println("OsmosisReplicationBaseUrl:", header.GetOsmosisReplicationBaseUrl())
 	fmt.Println("RequiredFeatures:", header.GetRequiredFeatures())
@@ -79,7 +84,7 @@ func main() {
 			break
 		}
 		check(err)
-		fname := fmt.Sprintf("chunks/%d_chunk_%s", i, path.Base(pbf.Filename))
+		fname := fmt.Sprintf("chunks/%d_chunk_%s", i, path.Base(pbf.Location))
 		file, err = os.Create(fname)
 		check(err)
 		headBlock.Write(file)
@@ -94,11 +99,15 @@ func main() {
 
 }
 
-func (pbf PBF) Rewind() {
+func (pbf PBFIO) Rewind() {
 	pbf.file.Seek(int64(0), 0)
 }
 
-func (pbf PBF) ReadFileHeader() (*OSMPBF.HeaderBlock, error) {
+func (pbf PBFIO) Seek(i int, w int) (int64, error) {
+	return pbf.file.Seek(int64(i), w)
+}
+
+func (pbf PBFIO) ReadFileHeader() (*OSMPBF.HeaderBlock, error) {
 
 	// Start at the beginning 'cause that's where the file header
 	// lives.
@@ -121,22 +130,22 @@ func (pbf PBF) ReadFileHeader() (*OSMPBF.HeaderBlock, error) {
 
 }
 
-func (pbf PBF) NextBlock() (*Block, error) {
+func (pbf PBFIO) NextBlock() (*Block, error) {
 
 	// First four bytes are a BigEndian int32 indicating the
 	// size of the subsequent BlobHeader.
 	sizeBlock := make([]byte, 4)
-	_, err := pbf.file.Read(sizeBlock)
+	_, err := pbf.Read(sizeBlock)
 	if err != nil {
 		return nil, err
 	}
 	size := binary.BigEndian.Uint32(sizeBlock)
 
-	startByte, _ := pbf.file.Seek(int64(0), 1)
+	startByte, _ := pbf.Seek(0, 1)
 
 	// Grab the next <size> bytes
 	b := make([]byte, size)
-	_, err = pbf.file.Read(b)
+	_, err = pbf.Read(b)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +159,7 @@ func (pbf PBF) NextBlock() (*Block, error) {
 
 	// Grab the blob size indicated by the blobHeader.
 	b = make([]byte, blobHeader.GetDatasize())
-	_, err = pbf.file.Read(b)
+	_, err = pbf.Read(b)
 	if err != nil {
 		return nil, err
 	}
