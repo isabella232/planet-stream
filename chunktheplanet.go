@@ -29,7 +29,7 @@ import (
 	"os"
 	"fmt"
 	"github.com/golang/protobuf/proto"
-	"github.com/yuffster/chunktheplanet/OSMPBF"  // not a real URL
+	"github.com/qedus/osmpbf/OSMPBF"
 	"encoding/binary"
 	"compress/zlib"
 	"bytes"
