@@ -43,6 +43,11 @@ type Stream interface {
 	GetCursor() (int64, error)
 }
 
+type RateLimiter struct {
+	lastRequest time.Time
+	requestRate time.Duration
+}
+
 // File IO
 type IOStream struct {
 	Location string
@@ -54,8 +59,7 @@ type HttpStream struct {
 	Location string
 	cur int64
 	client *http.Client
-	lastRequest time.Time
-	requestRate time.Duration
+	RateLimiter *RateLimiter
 }
 
 type Planetfile struct {
@@ -72,7 +76,7 @@ func OpenIO(filename string) (*IOStream, error) {
 }
 
 func OpenHttp(url string) (*HttpStream, error) {
-	return &HttpStream{url, 0, &http.Client{}, time.Now(), 0*time.Second}, nil
+	return &HttpStream{url, 0, &http.Client{}, &RateLimiter{time.Now(), 0*time.Second}}, nil
 }
 
 func OpenStream(loc string) (*Planetfile, error) {
@@ -110,14 +114,7 @@ func (pbf Planetfile) Close() {
 }
 
 func (s *HttpStream) Read(buff []byte) (int, error) {
-	if s.requestRate > 0 {
-		start := s.lastRequest
-		now := time.Now()
-		elapsed := now.Sub(start)
-		if elapsed < s.requestRate {
-			time.Sleep((s.requestRate-elapsed))
-		}
-	}
+	s.RateLimiter.limit()
 	end := s.cur + int64(len(buff))
 	req, _ := http.NewRequest("GET", s.Location, nil)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", s.cur, end))
@@ -126,7 +123,6 @@ func (s *HttpStream) Read(buff []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	s.lastRequest = time.Now()
 	// Stacked defers are LIFO: Last In, First Out, so these two lines
 	// will actually run backwards.
 	defer res.Body.Close()
@@ -313,6 +309,18 @@ func (b Block) Decode() ([]byte, error) {
 	default:
 		return nil, errors.New("unknown blob data")
 	}
+}
+
+func (r *RateLimiter) limit() {
+	if r.requestRate > 0 {
+		start := r.lastRequest
+		now := time.Now()
+		elapsed := now.Sub(start)
+		if elapsed < r.requestRate {
+			time.Sleep((r.requestRate-elapsed))
+		}
+	}
+	r.lastRequest = time.Now()
 }
 
 func humanBytes(s int64) string {
