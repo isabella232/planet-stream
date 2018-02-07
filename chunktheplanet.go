@@ -266,7 +266,7 @@ func (pbf Planetfile) Close() {
 // replication sequence number.
 func (pbf Planetfile) ReadFileHeader() (*OSMPBF.HeaderBlock, error) {
 
-	c := pbf.stream.GetCursor()
+	c, _ := pbf.stream.GetCursor()
 
 	// Start at the beginning 'cause that's where the file header
 	// lives.
