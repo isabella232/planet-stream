@@ -22,14 +22,13 @@
 //
 // For more information on the Protocol Buffer Binary Format:
 // https://wiki.openstreetmap.org/wiki/PBF_Format
-package main
+package streams
 
 import (
 	"bytes"
 	"compress/zlib"
 	"encoding/binary"
 	"errors"
-	"flag"
 	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -41,7 +40,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path"
 	"strings"
 	"time"
 )
@@ -50,52 +48,6 @@ func check(e error) {
 	if e != nil {
 		log.Fatal(e)
 	}
-}
-
-func main() {
-	locPtr := flag.String("i", "", "input file or URL")
-	flag.Parse()
-
-	fname := *locPtr
-	pbf, err := OpenStream(fname)
-	check(err)
-	defer pbf.Close()
-
-	header, err := pbf.ReadFileHeader()
-
-	fmt.Println("File:", pbf.Location)
-	fmt.Println("Source:", header.GetSource())
-	fmt.Println("OsmosisReplicationBaseUrl:", header.GetOsmosisReplicationBaseUrl())
-	fmt.Println("RequiredFeatures:", header.GetRequiredFeatures())
-	fmt.Println("Writingprogram:", header.GetWritingprogram())
-	fmt.Println("OsmosisReplicationSequenceNumber:", header.GetOsmosisReplicationSequenceNumber())
-
-	pbf.stream.Rewind()
-	headBlock, err := pbf.NextBlock()
-	check(err)
-
-	fmt.Printf("\n")
-	var file *os.File
-	i := 0
-	for {
-		block, err := pbf.NextBlock()
-		if err == io.EOF {
-			break
-		}
-		check(err)
-		fname := fmt.Sprintf("chunks/%d_chunk_%s", i, path.Base(pbf.Location))
-		file, err = os.Create(fname)
-		check(err)
-		headBlock.Write(file)
-		block.Write(file)
-		file.Close()
-		fmt.Printf("\r")
-		fmt.Printf("Processing... %s           ", humanBytes(block.StartByte))
-		i++
-	}
-
-	fmt.Printf("Processing complete; %d chunks total.\n", i)
-
 }
 
 // Generic interface for Streams; by default they keep track of their last
@@ -135,7 +87,7 @@ func (r *RateLimiter) limit() {
 
 // Opens a Stream wrapped in a Planetfile interface based on the protocol
 // specified in the location string.
-func OpenStream(loc string) (*Planetfile, error) {
+func Open(loc string) (*Planetfile, error) {
 	if strings.HasPrefix(loc, "http") {
 		s, e := OpenHttp(loc)
 		return &Planetfile{loc, s}, e
@@ -339,14 +291,14 @@ func (s *S3Stream) Close() error {
 // functionality.
 type Planetfile struct {
 	Location string
-	stream   Stream
+	Stream   Stream
 }
 
 // Calls the underlying Stream's Close function. Depending on the type of
 // Stream, this may not have any effect, but it's still a good thing to
 // do.
 func (pbf Planetfile) Close() {
-	pbf.stream.Close()
+	pbf.Stream.Close()
 }
 
 // Copies and decodes the first block of the Stream, which happens to
@@ -356,11 +308,11 @@ func (pbf Planetfile) Close() {
 // replication sequence number.
 func (pbf Planetfile) ReadFileHeader() (*OSMPBF.HeaderBlock, error) {
 
-	c, _ := pbf.stream.GetCursor()
+	c, _ := pbf.Stream.GetCursor()
 
 	// Start at the beginning 'cause that's where the file header
 	// lives.
-	pbf.stream.Rewind()
+	pbf.Stream.Rewind()
 
 	block, err := pbf.NextBlock()
 	if err != nil {
@@ -375,7 +327,7 @@ func (pbf Planetfile) ReadFileHeader() (*OSMPBF.HeaderBlock, error) {
 	header := new(OSMPBF.HeaderBlock)
 	err = proto.Unmarshal(data, header)
 
-	pbf.stream.SetCursor(c)
+	pbf.Stream.SetCursor(c)
 
 	return header, err
 
@@ -386,18 +338,18 @@ func (pbf Planetfile) NextBlock() (*Block, error) {
 	// First four bytes are a BigEndian int32 indicating the
 	// size of the subsequent BlobHeader.
 	sizeBlock := make([]byte, 4)
-	_, err := pbf.stream.Read(sizeBlock)
+	_, err := pbf.Stream.Read(sizeBlock)
 	if err != nil {
 		return nil, err
 	}
 
 	size := binary.BigEndian.Uint32(sizeBlock)
 
-	startByte, _ := pbf.stream.GetCursor()
+	startByte, _ := pbf.Stream.GetCursor()
 
 	// Grab the next <size> bytes
 	b := make([]byte, size)
-	_, err = pbf.stream.Read(b)
+	_, err = pbf.Stream.Read(b)
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +363,7 @@ func (pbf Planetfile) NextBlock() (*Block, error) {
 
 	// Grab the blob size indicated by the blobHeader.
 	b = make([]byte, blobHeader.GetDatasize())
-	_, err = pbf.stream.Read(b)
+	_, err = pbf.Stream.Read(b)
 	if err != nil {
 		return nil, err
 	}
@@ -504,18 +456,4 @@ func (b Block) Decode() ([]byte, error) {
 	default:
 		return nil, errors.New("unknown blob data")
 	}
-}
-
-func humanBytes(s int64) string {
-	units := []string{"B", "KB", "MB", "GB", "TB"}
-	n := float64(s)
-	i := 0
-	for {
-		if n < 1024 {
-			break
-		}
-		i++
-		n = n / 1024
-	}
-	return fmt.Sprintf("%0.2f %s", n, units[i])
 }
