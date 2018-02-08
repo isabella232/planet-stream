@@ -1,4 +1,4 @@
-// Works with the Protocol Buffer Binary Format (PBF) of OpenStreetMap 
+// Works with the Protocol Buffer Binary Format (PBF) of OpenStreetMap
 // planetfiles to break up a large file into many smaller, standalone files
 // that can be used like their larger counterparts for import and other data
 // pipeline uses.
@@ -8,7 +8,7 @@
 // machines running parallel operations.
 //
 // Additionally, this package provides multiple streaming modes for remote
-// servers which provide HTTP Range support, allowing for data to be 
+// servers which provide HTTP Range support, allowing for data to be
 // imported concurrently with its transfer.
 //
 // This package only deals with PBFs at the Block level, and does not
@@ -25,25 +25,25 @@
 package main
 
 import (
-	"log"
-	"os"
+	"bytes"
+	"compress/zlib"
+	"encoding/binary"
+	"errors"
+	"flag"
 	"fmt"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/golang/protobuf/proto"
 	"github.com/qedus/osmpbf/OSMPBF"
-	"encoding/binary"
-	"compress/zlib"
-	"bytes"
-	"errors"
-	"path"
 	"io"
 	"io/ioutil"
-	"flag"
+	"log"
 	"net/http"
+	"os"
+	"path"
 	"strings"
 	"time"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/aws/session"
 )
 
 func check(e error) {
@@ -107,7 +107,7 @@ type Stream interface {
 	Close() error
 	Read([]byte) (int, error)
 	Rewind()
-	SetCursor(int64) (error)
+	SetCursor(int64) error
 	GetCursor() (int64, error)
 }
 
@@ -127,12 +127,11 @@ func (r *RateLimiter) limit() {
 		now := time.Now()
 		elapsed := now.Sub(start)
 		if elapsed < r.RequestRate {
-			time.Sleep((r.RequestRate-elapsed))
+			time.Sleep((r.RequestRate - elapsed))
 		}
 	}
 	r.LastRequest = time.Now()
 }
-
 
 // Opens a Stream wrapped in a Planetfile interface based on the protocol
 // specified in the location string.
@@ -152,7 +151,7 @@ func OpenStream(loc string) (*Planetfile, error) {
 // IOStream attaches to a file location.
 type IOStream struct {
 	Location string
-	file *os.File
+	file     *os.File
 }
 
 // Creates a new IOStream and attaches it to the specified file location.
@@ -189,16 +188,16 @@ func (s IOStream) GetCursor() (int64, error) {
 }
 
 // Sets the current read position.
-func (s IOStream) SetCursor(i int64) (error) {
+func (s IOStream) SetCursor(i int64) error {
 	_, e := s.file.Seek(i, 0)
 	return e
 }
 
 // HTTP Streaming
 type HttpStream struct {
-	Location string
-	cur int64
-	client *http.Client
+	Location    string
+	cur         int64
+	client      *http.Client
 	RateLimiter *RateLimiter
 }
 
@@ -207,7 +206,7 @@ type HttpStream struct {
 // Should work with HTTP as well as HTTPS, but not on servers that don't
 // support byte Range headers.
 func OpenHttp(url string) (*HttpStream, error) {
-	return &HttpStream{url, 0, &http.Client{}, &RateLimiter{time.Now(), 0*time.Second}}, nil
+	return &HttpStream{url, 0, &http.Client{}, &RateLimiter{time.Now(), 0 * time.Second}}, nil
 }
 
 // Makes a partial HTTP request using the Range header for the specified number of bytes
@@ -242,7 +241,7 @@ func (s *HttpStream) GetCursor() (int64, error) {
 }
 
 // Sets the current read position.
-func (s *HttpStream) SetCursor(i int64) (error) {
+func (s *HttpStream) SetCursor(i int64) error {
 	s.cur = i
 	return nil
 }
@@ -251,17 +250,17 @@ func (s *HttpStream) SetCursor(i int64) (error) {
 // taking place.
 //
 // Provided to fulfill interface requirements.
-func (s *HttpStream) Close() (error) {
+func (s *HttpStream) Close() error {
 	return nil
 }
 
 // S3 Streaming
 type S3Stream struct {
-	Location string
-	Bucket string
-	Key string
-	service *s3.S3
-	cur int64
+	Location    string
+	Bucket      string
+	Key         string
+	service     *s3.S3
+	cur         int64
 	RateLimiter *RateLimiter
 }
 
@@ -274,19 +273,19 @@ func OpenS3(loc string) (*S3Stream, error) {
 		return &S3Stream{}, fmt.Errorf("Url must start with s3://; Got %s", loc)
 	}
 	p := strings.Split(loc[5:], "/")
-	bucket := strings.Join(p[0:len(p)-1], "/")+"/"
+	bucket := strings.Join(p[0:len(p)-1], "/") + "/"
 	key := p[len(p)-1]
 
 	// Create the AWS session and S3Stream
 	sess := session.Must(session.NewSession())
 	svc := s3.New(sess)
 	stream := &S3Stream{
-		Location: loc,
-		Bucket: bucket,
-		Key: key,
-		cur: 0,
-		service: svc,
-		RateLimiter: &RateLimiter{time.Now(), 0*time.Second},
+		Location:    loc,
+		Bucket:      bucket,
+		Key:         key,
+		cur:         0,
+		service:     svc,
+		RateLimiter: &RateLimiter{time.Now(), 0 * time.Second},
 	}
 
 	return stream, nil
@@ -324,7 +323,7 @@ func (s *S3Stream) GetCursor() (int64, error) {
 }
 
 // Sets the current read position.
-func (s *S3Stream) SetCursor(i int64) (error) {
+func (s *S3Stream) SetCursor(i int64) error {
 	s.cur = i
 	return nil
 }
@@ -332,7 +331,7 @@ func (s *S3Stream) SetCursor(i int64) (error) {
 // Doesn't actually do anything.
 //
 // Provided to fulfill interface requirements.
-func (s *S3Stream) Close() (error) {
+func (s *S3Stream) Close() error {
 	return nil
 }
 
@@ -340,7 +339,7 @@ func (s *S3Stream) Close() (error) {
 // functionality.
 type Planetfile struct {
 	Location string
-	stream Stream
+	stream   Stream
 }
 
 // Calls the underlying Stream's Close function. Depending on the type of
@@ -425,12 +424,12 @@ func (pbf Planetfile) NextBlock() (*Block, error) {
 	}
 
 	block := &Block{
-		DataType: blobHeader.GetType(),
-		Size: blob.GetRawSize(),
-		Blob: blob,
+		DataType:   blobHeader.GetType(),
+		Size:       blob.GetRawSize(),
+		Blob:       blob,
 		BlobHeader: blobHeader,
-		SizeBlock: sizeBlock,
-		StartByte: startByte,
+		SizeBlock:  sizeBlock,
+		StartByte:  startByte,
 	}
 	return block, err
 
@@ -449,13 +448,13 @@ func (pbf Planetfile) NextBlock() (*Block, error) {
 // For the purposes of this package, however, we only deal with the data
 // at the Block level.
 type Block struct {
-	Data []byte
-	DataType string
-	Size int32
-	Blob *OSMPBF.Blob
+	Data       []byte
+	DataType   string
+	Size       int32
+	Blob       *OSMPBF.Blob
 	BlobHeader *OSMPBF.BlobHeader
-	SizeBlock []byte
-	StartByte int64
+	SizeBlock  []byte
+	StartByte  int64
 }
 
 // Dumps the entire Block to the indicated file location, including its
