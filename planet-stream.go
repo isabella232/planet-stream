@@ -22,7 +22,7 @@
 //
 // For more information on the Protocol Buffer Binary Format:
 // https://wiki.openstreetmap.org/wiki/PBF_Format
-package chunktheplanet
+package main
 
 import (
 	"log"
