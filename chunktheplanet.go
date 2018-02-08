@@ -41,6 +41,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/aws/session"
 )
 
 func check(e error) {
@@ -138,6 +141,10 @@ func OpenStream(loc string) (*Planetfile, error) {
 		s, e := OpenHttp(loc)
 		return &Planetfile{loc, s}, e
 	}
+	if strings.HasPrefix(loc, "s3://") {
+		s, e := OpenS3(loc)
+		return &Planetfile{loc, s}, e
+	}
 	s, e := OpenIO(loc)
 	return &Planetfile{loc, s}, e
 }
@@ -171,7 +178,7 @@ func (s IOStream) Read(buff []byte) (int, error) {
 	return s.file.Read(buff)
 }
 
-// Sets the current read position to 0.
+// Sets the current read position to the beginning of the file.
 func (s IOStream) Rewind() {
 	s.SetCursor(0)
 }
@@ -224,14 +231,17 @@ func (s *HttpStream) Read(buff []byte) (int, error) {
 	return res.Body.Read(buff)
 }
 
+// Sets the current read position to the beginning of the file.
 func (s *HttpStream) Rewind() {
 	s.cur = int64(0)
 }
 
+// Returns the current read position.
 func (s *HttpStream) GetCursor() (int64, error) {
 	return s.cur, nil
 }
 
+// Sets the current read position.
 func (s *HttpStream) SetCursor(i int64) (error) {
 	s.cur = i
 	return nil
@@ -242,6 +252,87 @@ func (s *HttpStream) SetCursor(i int64) (error) {
 //
 // Provided to fulfill interface requirements.
 func (s *HttpStream) Close() (error) {
+	return nil
+}
+
+// S3 Streaming
+type S3Stream struct {
+	Location string
+	Bucket string
+	Key string
+	service *s3.S3
+	cur int64
+	RateLimiter *RateLimiter
+}
+
+// Opens an S3 bucket for streaming.
+//
+// The URL should be provided in s3://bucket/path/key format.
+func OpenS3(loc string) (*S3Stream, error) {
+	// Get the Bucket and Key
+	if strings.HasPrefix(loc, "s3://") == false {
+		return &S3Stream{}, fmt.Errorf("Url must start with s3://; Got %s", loc)
+	}
+	p := strings.Split(loc[5:], "/")
+	bucket := strings.Join(p[0:len(p)-1], "/")+"/"
+	key := p[len(p)-1]
+
+	// Create the AWS session and S3Stream
+	sess := session.Must(session.NewSession())
+	svc := s3.New(sess)
+	stream := &S3Stream{
+		Location: loc,
+		Bucket: bucket,
+		Key: key,
+		cur: 0,
+		service: svc,
+		RateLimiter: &RateLimiter{time.Now(), 0*time.Second},
+	}
+
+	return stream, nil
+}
+
+// Makes a partial request to the S3 service to retrieve the specified number
+// of bytes, starting at the current read position.
+func (s *S3Stream) Read(buff []byte) (int, error) {
+	s.RateLimiter.limit()
+	end := s.cur + int64(len(buff))
+	params := &s3.GetObjectInput{
+		Bucket: aws.String(s.Bucket),
+		Key:    aws.String(s.Key),
+		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", s.cur, end)),
+	}
+	s.SetCursor(end)
+	res, err := s.service.GetObject(params)
+	if err != nil {
+		return 0, err
+	}
+	res.Body.Read(buff)
+	defer res.Body.Close()
+	defer io.Copy(ioutil.Discard, res.Body)
+	return len(buff), nil
+}
+
+// Sets the current read position to the beginning of the file.
+func (s *S3Stream) Rewind() {
+	s.cur = int64(0)
+}
+
+// Returns the current read position.
+func (s *S3Stream) GetCursor() (int64, error) {
+	return s.cur, nil
+}
+
+// Sets the current read position.
+func (s *S3Stream) SetCursor(i int64) (error) {
+	s.cur = i
+	return nil
+}
+
+// Doesn't actually do anything.
+//
+// Provided to fulfill interface requirements.
+func (s *S3Stream) Close() (error) {
 	return nil
 }
 
