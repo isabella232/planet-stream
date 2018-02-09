@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/golang/protobuf/proto"
@@ -175,6 +176,16 @@ func (s *HttpStream) ReadRange(start int64, buff []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// If the HTTP server returns an error status code, it'll still count
+	// as a successful request by the http library.
+	//
+	// So we also have to make sure that the HTTP status code is 2xx.
+	if res.StatusCode <= 200 || res.StatusCode >= 299 {
+		if res.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+			return 0, io.EOF
+		}
+		return 0, errors.New(res.Status)
+	}
 	// Stacked defers are LIFO: Last In, First Out, so these two lines
 	// will actually run backwards.
 	defer res.Body.Close()
@@ -239,6 +250,10 @@ func (s *S3Stream) ReadRange(start int64, buff []byte) (int, error) {
 	}
 	res, err := s.service.GetObject(params)
 	if err != nil {
+		reqErr := err.(awserr.RequestFailure)
+		if reqErr.StatusCode() == http.StatusRequestedRangeNotSatisfiable {
+			return 0, io.EOF
+		}
 		return 0, err
 	}
 	res.Body.Read(buff)
