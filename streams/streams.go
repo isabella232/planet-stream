@@ -40,6 +40,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -57,10 +58,7 @@ func check(e error) {
 // work properly for various use cases.
 type Stream interface {
 	Close() error
-	Read([]byte) (int, error)
-	Rewind()
-	SetCursor(int64) error
-	GetCursor() (int64, error)
+	ReadRange(int64, []byte) (int, error)
 }
 
 // RateLimiter provides a generalized interface for limiting the rate at which
@@ -88,36 +86,46 @@ func (r *RateLimiter) limit() {
 // Opens a Stream wrapped in a Planetfile interface based on the protocol
 // specified in the location string.
 func Open(loc string) (*Planetfile, error) {
+
+	var e error
+	var s Stream
+
 	if strings.HasPrefix(loc, "http") {
-		s, e := OpenHttp(loc)
-		return &Planetfile{loc, s}, e
+		s, e = OpenHttp(loc)
+	} else if strings.HasPrefix(loc, "s3://") {
+		s, e = OpenS3(loc)
+	} else {
+		s, e = OpenIO(loc)
 	}
-	if strings.HasPrefix(loc, "s3://") {
-		s, e := OpenS3(loc)
-		return &Planetfile{loc, s}, e
+
+	if e != nil {
+		return &Planetfile{}, e
 	}
-	s, e := OpenIO(loc)
-	return &Planetfile{loc, s}, e
+	pbf := &Planetfile{loc, s}
+	// Peek at the header block to make sure it's readable and
+	// the right format; we're not interested in what it contains.
+	_, e = pbf.ReadFileHeader()
+	return pbf, nil
 }
 
 // IOStream attaches to a file location.
 type IOStream struct {
 	Location string
-	file     *os.File
+	abspath  string
 }
 
 // Creates a new IOStream and attaches it to the specified file location.
 func OpenIO(filename string) (*IOStream, error) {
-	file, err := os.Open(filename)
+	abs, err := filepath.Abs(filename)
 	if err != nil {
 		return &IOStream{}, err
 	}
-	return &IOStream{filename, file}, nil
+	return &IOStream{filename, abs}, nil
 }
 
-// Closes the file attached to this Stream.
+// Does nothing; provided for the interface.
 func (s IOStream) Close() error {
-	return s.file.Close()
+	return nil
 }
 
 // Fills the passed in byte array with the appropriate length of content from
@@ -125,24 +133,17 @@ func (s IOStream) Close() error {
 // complete.
 //
 // The return value is the number of bytes read.
-func (s IOStream) Read(buff []byte) (int, error) {
-	return s.file.Read(buff)
-}
-
-// Sets the current read position to the beginning of the file.
-func (s IOStream) Rewind() {
-	s.SetCursor(0)
-}
-
-// Returns the current read position.
-func (s IOStream) GetCursor() (int64, error) {
-	return s.file.Seek(0, 1)
-}
-
-// Sets the current read position.
-func (s IOStream) SetCursor(i int64) error {
-	_, e := s.file.Seek(i, 0)
-	return e
+func (s IOStream) ReadRange(start int64, buff []byte) (int, error) {
+	file, err := os.Open(s.Location)
+	defer file.Close()
+	if err != nil {
+		return 0, err
+	}
+	_, err = file.Seek(start, 0)
+	if err != nil {
+		return 0, err
+	}
+	return file.Read(buff)
 }
 
 // HTTP Streaming
@@ -165,12 +166,11 @@ func OpenHttp(url string) (*HttpStream, error) {
 // from the current read cursor.
 //
 // NB Range requests only work for servers which respond to byte range headers.
-func (s *HttpStream) Read(buff []byte) (int, error) {
+func (s *HttpStream) ReadRange(start int64, buff []byte) (int, error) {
 	s.RateLimiter.limit()
-	end := s.cur + int64(len(buff))
+	end := start + int64(len(buff))
 	req, _ := http.NewRequest("GET", s.Location, nil)
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", s.cur, end))
-	s.SetCursor(end)
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	res, err := s.client.Do(req)
 	if err != nil {
 		return 0, err
@@ -180,22 +180,6 @@ func (s *HttpStream) Read(buff []byte) (int, error) {
 	defer res.Body.Close()
 	defer io.Copy(ioutil.Discard, res.Body)
 	return res.Body.Read(buff)
-}
-
-// Sets the current read position to the beginning of the file.
-func (s *HttpStream) Rewind() {
-	s.cur = int64(0)
-}
-
-// Returns the current read position.
-func (s *HttpStream) GetCursor() (int64, error) {
-	return s.cur, nil
-}
-
-// Sets the current read position.
-func (s *HttpStream) SetCursor(i int64) error {
-	s.cur = i
-	return nil
 }
 
 // Doesn't actually do anything, as client requests are closed after
@@ -245,15 +229,14 @@ func OpenS3(loc string) (*S3Stream, error) {
 
 // Makes a partial request to the S3 service to retrieve the specified number
 // of bytes, starting at the current read position.
-func (s *S3Stream) Read(buff []byte) (int, error) {
+func (s *S3Stream) ReadRange(start int64, buff []byte) (int, error) {
 	s.RateLimiter.limit()
-	end := s.cur + int64(len(buff))
+	end := start + int64(len(buff))
 	params := &s3.GetObjectInput{
 		Bucket: aws.String(s.Bucket),
 		Key:    aws.String(s.Key),
-		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", s.cur, end)),
+		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", start, end)),
 	}
-	s.SetCursor(end)
 	res, err := s.service.GetObject(params)
 	if err != nil {
 		return 0, err
@@ -262,22 +245,6 @@ func (s *S3Stream) Read(buff []byte) (int, error) {
 	defer res.Body.Close()
 	defer io.Copy(ioutil.Discard, res.Body)
 	return len(buff), nil
-}
-
-// Sets the current read position to the beginning of the file.
-func (s *S3Stream) Rewind() {
-	s.cur = int64(0)
-}
-
-// Returns the current read position.
-func (s *S3Stream) GetCursor() (int64, error) {
-	return s.cur, nil
-}
-
-// Sets the current read position.
-func (s *S3Stream) SetCursor(i int64) error {
-	s.cur = i
-	return nil
 }
 
 // Doesn't actually do anything.
@@ -308,13 +275,7 @@ func (pbf Planetfile) Close() {
 // replication sequence number.
 func (pbf Planetfile) ReadFileHeader() (*OSMPBF.HeaderBlock, error) {
 
-	c, _ := pbf.Stream.GetCursor()
-
-	// Start at the beginning 'cause that's where the file header
-	// lives.
-	pbf.Stream.Rewind()
-
-	block, err := pbf.NextBlock()
+	block, err := pbf.GetBlock(0)
 	if err != nil {
 		return nil, err
 	}
@@ -327,32 +288,36 @@ func (pbf Planetfile) ReadFileHeader() (*OSMPBF.HeaderBlock, error) {
 	header := new(OSMPBF.HeaderBlock)
 	err = proto.Unmarshal(data, header)
 
-	pbf.Stream.SetCursor(c)
-
 	return header, err
 
 }
 
-func (pbf Planetfile) NextBlock() (*Block, error) {
+func (pbf Planetfile) GetBlock(startByte int64) (*Block, error) {
+
+	p := startByte
 
 	// First four bytes are a BigEndian int32 indicating the
 	// size of the subsequent BlobHeader.
 	sizeBlock := make([]byte, 4)
-	_, err := pbf.Stream.Read(sizeBlock)
+	l, err := pbf.Stream.ReadRange(startByte, sizeBlock)
 	if err != nil {
 		return nil, err
 	}
+
+	// Increment the byte cursor.
+	p += int64(l)
 
 	size := binary.BigEndian.Uint32(sizeBlock)
 
-	startByte, _ := pbf.Stream.GetCursor()
-
 	// Grab the next <size> bytes
 	b := make([]byte, size)
-	_, err = pbf.Stream.Read(b)
+	l, err = pbf.Stream.ReadRange(p, b)
 	if err != nil {
 		return nil, err
 	}
+
+	// Increment the byte cursor again.
+	p += int64(l)
 
 	// Unmarshal the Protobuf structure
 	blobHeader := new(OSMPBF.BlobHeader)
@@ -361,27 +326,12 @@ func (pbf Planetfile) NextBlock() (*Block, error) {
 		return nil, err
 	}
 
-	// Grab the blob size indicated by the blobHeader.
-	b = make([]byte, blobHeader.GetDatasize())
-	_, err = pbf.Stream.Read(b)
-	if err != nil {
-		return nil, err
-	}
-
-	// Unmarshal the Blob structure
-	blob := new(OSMPBF.Blob)
-	err = proto.Unmarshal(b, blob)
-	if err != nil {
-		return nil, err
-	}
-
 	block := &Block{
+		pbf:        pbf,
 		DataType:   blobHeader.GetType(),
-		Size:       blob.GetRawSize(),
-		Blob:       blob,
-		BlobHeader: blobHeader,
-		SizeBlock:  sizeBlock,
-		StartByte:  startByte,
+		BlockStart: startByte,
+		BlobStart:  p,
+		BlockEnd:   p + int64(blobHeader.GetDatasize()),
 	}
 	return block, err
 
@@ -400,38 +350,52 @@ func (pbf Planetfile) NextBlock() (*Block, error) {
 // For the purposes of this package, however, we only deal with the data
 // at the Block level.
 type Block struct {
-	Data       []byte
+	pbf        Planetfile
 	DataType   string
-	Size       int32
-	Blob       *OSMPBF.Blob
-	BlobHeader *OSMPBF.BlobHeader
-	SizeBlock  []byte
-	StartByte  int64
+	BlockStart int64
+	BlobStart  int64
+	BlockEnd   int64
 }
 
 // Dumps the entire Block to the indicated file location, including its
 // leading size delimiter and BlobHeader.
-func (b Block) Write(f *os.File) int {
-	f.Write(b.SizeBlock)
-	data, err := proto.Marshal(b.BlobHeader)
-	check(err)
-	_, err = f.Write(data)
-	check(err)
-	data, err = proto.Marshal(b.Blob)
-	check(err)
-	size, err := f.Write(data)
-	check(err)
-	return size
+func (b Block) Write(f io.Writer) (int, error) {
+	buff := make([]byte, b.BlockEnd-b.BlockStart)
+	_, err := b.pbf.Stream.ReadRange(b.BlobStart, buff)
+	if err != nil {
+		return 0, err
+	}
+	size, err := f.Write(buff)
+	if err != nil {
+		return 0, err
+	}
+	return size, nil
 }
 
-// Decodes the raw data of the Block so that it can be demarshaled.
+// Reads the appropriate range in the Stream to obtain the Blob data and
+// then unmarshals it.
+func (b Block) GetBlob() (*OSMPBF.Blob, error) {
+	data := make([]byte, b.BlockEnd-b.BlobStart)
+	b.pbf.Stream.ReadRange(b.BlobStart, data)
+	blob := new(OSMPBF.Blob)
+	err := proto.Unmarshal(data, blob)
+	if err != nil {
+		return blob, err
+	}
+	return blob, nil
+}
+
+// Decodes the raw data of the Block so that it can be unmarshaled.
 //
 // Sometimes the data is gzipped, in which case it will be decompressed
 // before being returned.
 //
 // (Taken directly from qedus/osmpbf.)
 func (b Block) Decode() ([]byte, error) {
-	blob := b.Blob
+	blob, err := b.GetBlob()
+	if err != nil {
+		return make([]byte, 0), err
+	}
 	// All of this is taken directly from github.com/qedus/osmpbf/OSMPBF
 	switch {
 	case blob.Raw != nil:

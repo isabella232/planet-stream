@@ -1,13 +1,13 @@
 package main
 
-import(
+import (
 	"flag"
 	"fmt"
 	"github.com/mapbox/planet-stream/streams"
-	"os"
 	"io"
-	"path"
 	"log"
+	"os"
+	"path"
 )
 
 func check(e error) {
@@ -39,27 +39,30 @@ func main() {
 	fmt.Println("Writingprogram:", header.GetWritingprogram())
 	fmt.Println("OsmosisReplicationSequenceNumber:", header.GetOsmosisReplicationSequenceNumber())
 
-	pbf.Stream.Rewind()
-	headBlock, err := pbf.NextBlock()
+	headBlock, err := pbf.GetBlock(0)
 	check(err)
+
+	p := headBlock.BlockEnd
 
 	fmt.Printf("\n")
 	var file *os.File
 	i := 0
 	for {
-		block, err := pbf.NextBlock()
+		block, err := pbf.GetBlock(p)
 		if err == io.EOF {
 			break
 		}
 		check(err)
+		p = block.BlockEnd
 		fname := fmt.Sprintf("chunks/%d_chunk_%s", i, path.Base(pbf.Location))
 		file, err = os.Create(fname)
 		check(err)
-		headBlock.Write(file)
+		_, err = headBlock.Write(file)
+		check(err)
 		block.Write(file)
 		file.Close()
 		fmt.Printf("\r")
-		fmt.Printf("Processing... %s           ", humanBytes(block.StartByte))
+		fmt.Printf("Processing... %s           ", humanBytes(block.BlockStart))
 		i++
 	}
 
