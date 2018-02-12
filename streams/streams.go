@@ -292,6 +292,7 @@ func OpenS3(loc string) (*S3Stream, error) {
 // NB: Cached on Planetfile struct as TotalSize when a Stream is opened,
 // which also ensures the object exists in S3.
 func (s *S3Stream) GetSize() (int64, error) {
+	s.RateLimiter.limit()
 	params := &s3.HeadObjectInput{
 		Bucket: aws.String(s.Bucket),
 		Key:    aws.String(s.Key),
