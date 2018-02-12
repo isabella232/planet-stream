@@ -381,6 +381,18 @@ type Block struct {
 	BlockEnd   int64
 }
 
+// Dumps the entire block to a byte array.
+//
+// Useful if you're going to be using a particular block many times,
+// for example the HeaderBlock, and don't want to make multiple
+// requests to retreive the data from the source every time it's
+// needed.
+func (b Block) Dump() ([]byte, error) {
+	buff := make([]byte, b.BlockEnd-b.BlockStart)
+	_, err := b.pbf.Stream.ReadRange(b.BlockStart, buff)
+	return buff, err
+}
+
 // Dumps the entire Block to the indicated file location, including its
 // leading size delimiter and BlobHeader.
 func (b Block) Write(f io.Writer) (int, error) {

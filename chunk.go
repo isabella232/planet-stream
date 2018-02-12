@@ -42,6 +42,9 @@ func main() {
 	headBlock, err := pbf.GetBlock(0)
 	check(err)
 
+	headData, err := headBlock.Dump()
+	check(err)
+
 	p := headBlock.BlockEnd
 
 	fmt.Printf("\n")
@@ -57,7 +60,7 @@ func main() {
 		fname := fmt.Sprintf("chunks/%d_chunk_%s", i, path.Base(pbf.Location))
 		file, err = os.Create(fname)
 		check(err)
-		_, err = headBlock.Write(file)
+		_, err = file.Write(headData)
 		check(err)
 		block.Write(file)
 		file.Close()
