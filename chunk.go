@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"github.com/mapbox/planet-stream/streams"
-	"io"
 	"log"
 	"os"
 	"path"
@@ -45,16 +44,17 @@ func main() {
 	headData, err := headBlock.Dump()
 	check(err)
 
+	fmt.Printf("Total size: %d bytes\n", pbf.TotalSize)
 	p := headBlock.BlockEnd
 
 	fmt.Printf("\n")
 	var file *os.File
 	i := 0
 	for {
-		block, err := pbf.GetBlock(p)
-		if err == io.EOF {
+		if p >= pbf.TotalSize {
 			break
 		}
+		block, err := pbf.GetBlock(p)
 		check(err)
 		p = block.BlockEnd
 		fname := fmt.Sprintf("chunks/%d_chunk_%s", i, path.Base(pbf.Location))
@@ -68,6 +68,8 @@ func main() {
 		fmt.Printf("Processing... %s           ", humanBytes(block.BlockStart))
 		i++
 	}
+
+	fmt.Printf("\nProcessed size: %d bytes\n", p)
 
 	fmt.Printf("Processing complete; %d chunks total.\n", i)
 

@@ -60,6 +60,7 @@ func check(e error) {
 type Stream interface {
 	Close() error
 	ReadRange(int64, []byte) (int, error)
+	GetSize() (int64, error)
 }
 
 // RateLimiter provides a generalized interface for limiting the rate at which
@@ -102,9 +103,16 @@ func Open(loc string) (*Planetfile, error) {
 	if e != nil {
 		return &Planetfile{}, e
 	}
+
+	sz, err := s.GetSize()
+	if err != nil {
+		return &Planetfile{}, err
+	}
+
 	pbf := &Planetfile{
-		Location: loc,
-		Stream:   s,
+		Location:  loc,
+		Stream:    s,
+		TotalSize: sz,
 	}
 	// Peek at the header block to make sure it's readable and
 	// the right format; we're not interested in what it contains.
@@ -125,6 +133,22 @@ func OpenIO(filename string) (*IOStream, error) {
 		return &IOStream{}, err
 	}
 	return &IOStream{filename, abs}, nil
+}
+
+// Does a stat on the file location to grab its size.
+//
+// Useful for making sure we process every block of a given file.
+//
+// NB: Cached on Planetfile struct as TotalSize when a Stream is opened,
+// which also ensures the file location exists.
+func (s *IOStream) GetSize() (int64, error) {
+	file, err := os.Open(s.Location)
+	defer file.Close()
+	st, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return st.Size(), nil
 }
 
 // Does nothing; provided for the interface.
@@ -164,6 +188,23 @@ type HttpStream struct {
 // support byte Range headers.
 func OpenHttp(url string) (*HttpStream, error) {
 	return &HttpStream{url, 0, &http.Client{}, &RateLimiter{time.Now(), 0 * time.Second}}, nil
+}
+
+// Makes a HEAD request to get the total filesize.
+//
+// Useful for making sure we process every block, and can eliminate an
+// extraneous request at the end for the final RangeNotSatisfiable status.
+//
+// NB: Cached on Planetfile struct as TotalSize when a Stream is opened,
+// which also ensures the URL exists on the external server and is reachable.
+func (s *HttpStream) GetSize() (int64, error) {
+	s.RateLimiter.limit()
+	req, _ := http.NewRequest("HEAD", s.Location, nil)
+	res, err := s.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	return res.ContentLength, nil
 }
 
 // Makes a partial HTTP request using the Range header for the specified number of bytes
@@ -243,6 +284,25 @@ func OpenS3(loc string) (*S3Stream, error) {
 	return stream, nil
 }
 
+// Makes a HEAD request to get the total filesize.
+//
+// Useful for making sure we process every block, and can eliminate an
+// extraneous request at the end for the final RangeNotSatisfiable status.
+//
+// NB: Cached on Planetfile struct as TotalSize when a Stream is opened,
+// which also ensures the object exists in S3.
+func (s *S3Stream) GetSize() (int64, error) {
+	params := &s3.HeadObjectInput{
+		Bucket: aws.String(s.Bucket),
+		Key:    aws.String(s.Key),
+	}
+	res, err := s.service.HeadObject(params)
+	if err != nil {
+		return 0, err
+	}
+	return *res.ContentLength, nil
+}
+
 // Makes a partial request to the S3 service to retrieve the specified number
 // of bytes, starting at the current read position.
 func (s *S3Stream) ReadRange(start int64, buff []byte) (int, error) {
@@ -281,8 +341,9 @@ func (s *S3Stream) Close() error {
 // Planetfile provides high-level interface to the specific streaming
 // functionality.
 type Planetfile struct {
-	Location string
-	Stream   Stream
+	Location  string
+	Stream    Stream
+	TotalSize int64
 }
 
 // Calls the underlying Stream's Close function. Depending on the type of
