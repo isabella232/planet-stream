@@ -102,7 +102,10 @@ func Open(loc string) (*Planetfile, error) {
 	if e != nil {
 		return &Planetfile{}, e
 	}
-	pbf := &Planetfile{loc, s}
+	pbf := &Planetfile{
+		Location: loc,
+		Stream:   s,
+	}
 	// Peek at the header block to make sure it's readable and
 	// the right format; we're not interested in what it contains.
 	_, e = pbf.ReadFileHeader()
