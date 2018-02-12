@@ -397,7 +397,7 @@ func (b Block) Dump() ([]byte, error) {
 // leading size delimiter and BlobHeader.
 func (b Block) Write(f io.Writer) (int, error) {
 	buff := make([]byte, b.BlockEnd-b.BlockStart)
-	_, err := b.pbf.Stream.ReadRange(b.BlobStart, buff)
+	_, err := b.pbf.Stream.ReadRange(b.BlockStart, buff)
 	if err != nil {
 		return 0, err
 	}
