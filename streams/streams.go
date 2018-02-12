@@ -186,11 +186,13 @@ func (s *HttpStream) ReadRange(start int64, buff []byte) (int, error) {
 		}
 		return 0, errors.New(res.Status)
 	}
-	// Stacked defers are LIFO: Last In, First Out, so these two lines
-	// will actually run backwards.
-	defer res.Body.Close()
-	defer io.Copy(ioutil.Discard, res.Body)
-	return res.Body.Read(buff)
+	b, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return 0, err
+	}
+	copy(buff, b)
+	res.Body.Close()
+	return len(buff), nil
 }
 
 // Doesn't actually do anything, as client requests are closed after
@@ -256,9 +258,13 @@ func (s *S3Stream) ReadRange(start int64, buff []byte) (int, error) {
 		}
 		return 0, err
 	}
-	res.Body.Read(buff)
-	defer res.Body.Close()
-	defer io.Copy(ioutil.Discard, res.Body)
+	b, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return 0, err
+	}
+	copy(buff, b)
+	res.Body.Close()
+
 	return len(buff), nil
 }
 
